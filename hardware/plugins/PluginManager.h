@@ -39,7 +39,6 @@ namespace Plugins {
 		bool StopPluginSystem();
 		void AllPluginsStarted() { m_bAllPluginsStarted = true; };
 		static void LoadSettings();
-		void	DeviceModified(uint64_t ID);
 	};
 };
 
