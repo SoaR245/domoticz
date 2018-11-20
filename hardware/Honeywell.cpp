@@ -27,50 +27,53 @@ const std::string kRoomTempDesc = "Room temperature ([devicename])";
 
 extern http::server::CWebServerHelper m_webservers;
 
-CHoneywell::CHoneywell(const int ID, const std::string &Username, const std::string &Password, const int Mode1, const int Mode2, const int Mode3, const int Mode4, const int Mode5, const int Mode6) {
+CHoneywell::CHoneywell(const int ID, const std::string &Username, const std::string &Password)
+{
+	m_HwdID = ID;
+	mAccessToken = Username;
+	mRefreshToken = Password;
+	stdstring_trim(mAccessToken);
+	stdstring_trim(mRefreshToken);
 	if (Username.empty() || Password.empty()) {
 		_log.Log(LOG_ERROR, "Honeywell: Please update your access token/request token!...");
 	}
-	else {
-		mAccessToken = Username;
-		mRefreshToken = Password;
-		stdstring_trim(mAccessToken);
-		stdstring_trim(mRefreshToken);
-	}
-
-	m_HwdID = ID;
 	Init();
-
 }
 
-CHoneywell::~CHoneywell(void) {
+CHoneywell::~CHoneywell(void)
+{
 }
 
-void CHoneywell::Init() {
-	mStopRequested = false;
+void CHoneywell::Init()
+{
 	mNeedsTokenRefresh = true;
 }
 
-bool CHoneywell::StartHardware() {
+bool CHoneywell::StartHardware()
+{
+	RequestStart();
+
 	Init();
 	mLastMinute = -1;
 	//Start worker thread
-	mThread = boost::shared_ptr<boost::thread>(new boost::thread(boost::bind(&CHoneywell::Do_Work, this)));
-	mIsStarted=true;
+	m_thread = std::make_shared<std::thread>(&CHoneywell::Do_Work, this);
+	SetThreadName(m_thread->native_handle(), "Honeywell");
+	mIsStarted = true;
 	sOnConnected(this);
-	return (mThread!=NULL);
+	return (m_thread != nullptr);
 }
 
-bool CHoneywell::StopHardware() {
-	if (mThread!=NULL)
+bool CHoneywell::StopHardware()
+{
+	if (m_thread)
 	{
-		assert(mThread);
-		mStopRequested = true;
-		mThread->join();
+		RequestStop();
+		m_thread->join();
+		m_thread.reset();
 	}
 
-	mIsStarted=false;
-  return true;
+	mIsStarted = false;
+	return true;
 }
 
 #define HONEYWELL_POLL_INTERVAL 300 // 5 minutes
@@ -78,29 +81,30 @@ bool CHoneywell::StopHardware() {
 //
 // worker thread
 //
-void CHoneywell::Do_Work() {
-	_log.Log(LOG_STATUS,"Honeywell: Worker started...");
-	int sec_counter = HONEYWELL_POLL_INTERVAL-5;
-	while (!mStopRequested)
+void CHoneywell::Do_Work()
+{
+	_log.Log(LOG_STATUS, "Honeywell: Worker started...");
+	int sec_counter = HONEYWELL_POLL_INTERVAL - 5;
+	while (!IsStopRequested(1000))
 	{
-		sleep_seconds(1);
 		sec_counter++;
 		if (sec_counter % 12 == 0) {
-			m_LastHeartbeat=mytime(NULL);
+			m_LastHeartbeat = mytime(NULL);
 		}
 		if (sec_counter % HONEYWELL_POLL_INTERVAL == 0)
 		{
 			GetMeterDetails();
 		}
 	}
-	_log.Log(LOG_STATUS,"Honeywell: Worker stopped...");
+	_log.Log(LOG_STATUS, "Honeywell: Worker stopped...");
 }
 
 
 //
 // callback from Domoticz backend to update the Honeywell thermostat
 //
-bool CHoneywell::WriteToHardware(const char *pdata, const unsigned char length) {
+bool CHoneywell::WriteToHardware(const char *pdata, const unsigned char /*length*/)
+{
 	const tRBUF *pCmd = reinterpret_cast<const tRBUF *>(pdata);
 	if (pCmd->LIGHTING2.packettype == pTypeLighting2)
 	{
@@ -124,10 +128,7 @@ bool CHoneywell::WriteToHardware(const char *pdata, const unsigned char length) 
 		int nodeID = pCmd->LIGHTING2.id4;
 		int devID = nodeID / 10;
 		const _tThermostat *therm = reinterpret_cast<const _tThermostat*>(pdata);
-		float temp = therm->temp;
-		int calculatedTemp = (int)temp;
-
-		SetSetpoint(devID, temp, nodeID);
+		SetSetpoint(devID, therm->temp, nodeID);
 	}
 	return false;
 }
@@ -135,7 +136,8 @@ bool CHoneywell::WriteToHardware(const char *pdata, const unsigned char length) 
 //
 // refresh the OAuth2 token through Honeywell API
 //
-bool CHoneywell::refreshToken() {
+bool CHoneywell::refreshToken()
+{
 	if (mRefreshToken.empty())
 		return false;
 
@@ -147,7 +149,7 @@ bool CHoneywell::refreshToken() {
 	std::string auth = HONEYWELL_APIKEY;
 	auth += ":";
 	auth += HONEYWELL_APISECRET;
-	std::string encodedAuth = base64_encode((const unsigned char *)auth.c_str(), auth.length());
+	std::string encodedAuth = base64_encode(auth);
 
 
 	std::vector<std::string> headers;
@@ -192,8 +194,8 @@ bool CHoneywell::refreshToken() {
 //
 // Get honeywell data through Honeywell API
 //
-void CHoneywell::GetMeterDetails() {
-
+void CHoneywell::GetMeterDetails()
+{
 	if (mNeedsTokenRefresh) {
 		if (!refreshToken())
 			return;
@@ -220,10 +222,12 @@ void CHoneywell::GetMeterDetails() {
 	int devNr = 0;
 	mDeviceList.clear();
 	mLocationList.clear();
-	for (size_t locCnt = 0; locCnt < root.size(); locCnt++) {
+	for (int locCnt = 0; locCnt < (int)root.size(); locCnt++)
+	{
 		Json::Value location = root[locCnt];
 		Json::Value devices = location["devices"];
-		for (size_t devCnt = 0; devCnt < devices.size(); devCnt++) {
+		for (int devCnt = 0; devCnt < (int)devices.size(); devCnt++)
+		{
 			Json::Value device = devices[devCnt];
 			std::string deviceName = device["name"].asString();
 			mDeviceList[devNr] = device;
@@ -233,23 +237,23 @@ void CHoneywell::GetMeterDetails() {
 			temperature = (float)device["indoorTemperature"].asFloat();
 			std::string desc = kRoomTempDesc;
 			stdreplace(desc, "[devicename]", deviceName);
-			SendTempSensor(10*devNr + 1, 255, temperature, desc);
+			SendTempSensor(10 * devNr + 1, 255, temperature, desc);
 
 			temperature = (float)device["outdoorTemperature"].asFloat();
 			desc = kOutdoorTempDesc;
 			stdreplace(desc, "[devicename]", deviceName);
-			SendTempSensor(10*devNr + 2, 255, temperature, desc);
+			SendTempSensor(10 * devNr + 2, 255, temperature, desc);
 
 			std::string mode = device["changeableValues"]["mode"].asString();
 			bool bHeating = (mode == "Heat");
 			desc = kHeatingDesc;
 			stdreplace(desc, "[devicename]", deviceName);
-			SendSwitch(10*devNr + 3, 1, 255, bHeating, 0, desc);
+			SendSwitch(10 * devNr + 3, 1, 255, bHeating, 0, desc);
 
 			temperature = (float)device["changeableValues"]["heatSetpoint"].asFloat();
 			desc = kHeatSetPointDesc;
 			stdreplace(desc, "[devicename]", deviceName);
-			SendSetPointSensor(10*devNr + 4, temperature, desc);
+			SendSetPointSensor((uint8_t)(10 * devNr + 4), temperature, desc);
 			devNr++;
 		}
 	}
@@ -261,14 +265,14 @@ void CHoneywell::GetMeterDetails() {
 void CHoneywell::SendSetPointSensor(const unsigned char Idx, const float Temp, const std::string &defaultname)
 {
 	_tThermostat thermos;
-	thermos.subtype=sTypeThermSetpoint;
-	thermos.id1=0;
-	thermos.id2=0;
-	thermos.id3=0;
-	thermos.id4=Idx;
-	thermos.dunit=0;
+	thermos.subtype = sTypeThermSetpoint;
+	thermos.id1 = 0;
+	thermos.id2 = 0;
+	thermos.id3 = 0;
+	thermos.id4 = Idx;
+	thermos.dunit = 0;
 
-	thermos.temp=Temp;
+	thermos.temp = Temp;
 
 	sDecodeRXMessage(this, (const unsigned char *)&thermos, defaultname.c_str(), 255);
 }
@@ -276,7 +280,7 @@ void CHoneywell::SendSetPointSensor(const unsigned char Idx, const float Temp, c
 //
 // transfer pause status to Honeywell api
 //
-void CHoneywell::SetPauseStatus(const int idx, bool bHeating, const int nodeid)
+void CHoneywell::SetPauseStatus(const int idx, bool bHeating, const int /*nodeid*/)
 {
 	std::string url = HONEYWELL_UPDATE_THERMOSTAT;
 	std::string deviceID = mDeviceList[idx]["deviceID"].asString();
@@ -300,13 +304,13 @@ void CHoneywell::SetPauseStatus(const int idx, bool bHeating, const int nodeid)
 
 	std::string desc = kHeatingDesc;
 	stdreplace(desc, "[devicename]", mDeviceList[idx]["name"].asString());
-	SendSwitch(10*idx + 3, 1, 255, bHeating, 0, desc);
+	SendSwitch(10 * idx + 3, 1, 255, bHeating, 0, desc);
 }
 
 //
 // transfer the updated temperature to Honeywell API
 //
-void CHoneywell::SetSetpoint(const int idx, const float temp, const int nodeid)
+void CHoneywell::SetSetpoint(const int idx, const float temp, const int /*nodeid*/)
 {
 	std::string url = HONEYWELL_UPDATE_THERMOSTAT;
 	std::string deviceID = mDeviceList[idx]["deviceID"].asString();
@@ -330,9 +334,9 @@ void CHoneywell::SetSetpoint(const int idx, const float temp, const int nodeid)
 
 	std::string desc = kHeatSetPointDesc;
 	stdreplace(desc, "[devicename]", mDeviceList[idx]["name"].asString());
-	SendSetPointSensor(10*idx + 4, temp, desc);
+	SendSetPointSensor((uint8_t)(10 * idx + 4), temp, desc);
 
 	desc = kHeatingDesc;
 	stdreplace(desc, "[devicename]", mDeviceList[idx]["name"].asString());
-	SendSwitch(10*idx + 3, 1, 255, true, 0, desc);
+	SendSwitch(10 * idx + 3, 1, 255, true, 0, desc);
 }
